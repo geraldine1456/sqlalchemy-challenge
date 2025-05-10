@@ -1,7 +1,7 @@
 # # Import the dependencies.
-# import datetime as datetime
 import numpy as np
 import pandas as pd
+import datetime as dt
 from flask import Flask, jsonify
 from sqlalchemy import create_engine, func
 from sqlalchemy.ext.automap import automap_base
@@ -15,17 +15,17 @@ from sqlalchemy.orm import Session
 # Create the connection to the SQLite database
 engine = create_engine("sqlite:///Resources/hawaii.sqlite")
 
-# create a base class for the ORM
-Base = automap_base()
-# base.prepare(engine, reflect=True)
-Base.prepare(autoload_with=engine)
+# Reflect an existing database into a new model
+base = automap_base()
 
+# Reflect the tables
+base.prepare(autoload_with=engine)
 
-# save reference to the table
-station = Base.classes.station
-measurement = Base.classes.measurement
+# Save reference to the table
+measurement = base.classes.measurement
+station = base.classes.station
 
-# create a session 
+# Create our session (link) from Python to the DB
 session = Session(engine)
 
 #################################################
@@ -48,90 +48,89 @@ def welcome():
         f"/api/v1.0/precipitation<br>"
         f"/api/v1.0/stations<br>"
         f"/api/v1.0/tobs<br>"
-        f"/api/v1.0/&lt;startdate&gt; (Date format: YYYY-MM-DD)<br>"
-        f"/api/v1.0/&lt;startdate&gt;/&lt;enddate&gt; (Date format: YYYY-MM-DD for both start and end dates)<br>"
+        f"/api/v1.0/&lt;start&gt;<br>"
+        f"/api/v1.0/&lt;start&gt;/&lt;end&gt;<br>"
     )
-
     
 # Precipitation Route
 @app.route("/api/v1.0/precipitation")
 def precipitation():
 
-    # Get the most recent date
-    most_recent_date = session.query(func.max(measurement.date)).scalar()
-
+    # Retrieve the most recent date in the dataset
+    most_recent_date = session.query(func.max(measurement.date)).first()
+   
     # Calculate the date one year from the last date in data set.
-    last_12_months = (pd.to_datetime(most_recent_date) - pd.DateOffset(years=1)).date()
+    one_year_ago  = (pd.to_datetime(most_recent_date[0]) - pd.DateOffset(years=1)).date()
 
-    # Query the date and precipitation scores in the last 12 months
-    precipitation = session.query(measurement.date, measurement.prcp)\
-    .filter(measurement.date >= last_12_months).all()
+    # Query the  precipation data one year ago
+    results = session.query(measurement.date, measurement.prcp)\
+    .filter(measurement.date >= one_year_ago).all()
 
-    # Convert the result to dictionary
-    precipitation_dict = {date: prcp for date, prcp in precipitation}
+    # Convert the query results into a dictionary
+    precipitation = {date: prcp for date, prcp in results}
 
-    return jsonify(precipitation_dict)
+    return jsonify(precipitation)
 
 # Station Route
 @app.route("/api/v1.0/stations")
 def stations():
    
-    # Query station data from the station table
-    station = session.query(station.station).all()
-    
-    # Create a dictionary from the row data and append to a list of station data
-    station_data = []
-    for row in results:
-        station_dict = {
-            "id": row.id,
-            "station": row.station,
-            "name": row.name,
-            "latitude": row.latitude,
-            "longitude": row.longitude,
-            "elevation": row.elevation
-        }
-        station_data.append(station_dict)
-       
-    return jsonify(stations_list)
+    # Query the station IDs and their counts
+    results = session.query(
+        measurement.station, 
+        func.count(measurement.station).label("station_count")
+    ).group_by(measurement.station).order_by(func.count(measurement.station).desc()).all()
+
+    # Convert query results to a dictionary
+    station_list = [
+        {"station": station, "count": count} 
+        for station, count in results
+    ]
+    return jsonify(station_list)
 
 #  TOBS Route (Temperature Observations) for the most active station 
 @app.route("/api/v1.0/tobs")
 def tobs():
     
-    most_active_station = "USC00519281"
+    # Identify the  most active weather station
+    most_active_station = session.query(
+        measurement.station, 
+        func.count(measurement.station).label("station_count")
+        ).group_by(measurement.station
+    ).order_by(func.count(measurement.station).desc()).first()
 
-    # Get the most recent date
-    most_recent_date = session.query(func.max(measurement.date)).scalar()
+    most_active_station_id = most_active_station[0]  # Extract the station ID
 
-    # Calculate the date one year from the last date in data set.
-    last_12_months = (pd.to_datetime(most_recent_date) - pd.DateOffset(years=1)).date()
+    # Retrieve the most recent date in the dataset
+    most_recent_date = session.query(func.max(measurement.date)).first()
+
+    # Query the tobs data of the most-active station one year ago
+    one_year_ago  = (pd.to_datetime(most_recent_date[0]) - pd.DateOffset(years=1)).date()
+    results = session.query(measurement.date, measurement.tobs).filter(
+        measurement.station == most_active_station_id,
+        measurement.date >= one_year_ago).all()
     
-    # Query the temperature observation data(tobs) in the last 12 months
-    tobs = session.query(measurement.date, measurement.tobs).filter(
-        measurement.station == most_active_station,
-        measurement.date >= last_12_months).all()
+    # Convert the query  results to a dictionary
+    tobs = [{"date": date, "tobs": temp} for date, temp in results]
+
+    return jsonify(tobs)
     
-    # Convert the tobs results to dictionary
-    tobs_list = [{"date": date, "tobs": temp} for date, temp in tobs]
-
-    return jsonify(tobs_list)
-
 # Start Date Route
 @app.route("/api/v1.0/<start>")
 def start_date(start):
-    # Check if start and end dates exist in the dataset
+    # Verify if the provided start date exists in the dataset
     dates = [row[0] for row in session.query(measurement.date).distinct().all()]
     if start not in dates:
         return jsonify({"error": f"Start date {start} not found in dataset."})
     
-    # Query temperature statistics from the given start date onward
+    # Query temperature statistics from the start date onward
     results = session.query(
         func.min(measurement.tobs).label('TMIN'),
         func.max(measurement.tobs).label('TMAX'),
         func.avg(measurement.tobs).label('TAVG')
     ).filter(measurement.date >= start).all()
 
-    # Convert the results to a dictionary
+    # Convert the query results to a dictionary
     temperature = {
         "Start Date": start,
         "TMIN": results[0].TMIN,   
@@ -145,7 +144,7 @@ def start_date(start):
 @app.route("/api/v1.0/<start>/<end>")
 def start_end_date(start, end):
 
- # Check if start and end dates exist in the dataset
+    # Verify  if the provided start and end dates exist in the dataset
     dates = [row[0] for row in session.query(measurement.date).distinct().all()]
     if start not in dates:
         return jsonify({"error": f"Start date {start} not found in dataset."})
